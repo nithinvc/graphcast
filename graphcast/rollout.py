@@ -437,6 +437,8 @@ def extend_targets_template(
 
     # Assert the first target time corresponds to the timestep.
     timestep = time[0].data
+
+    # NOTE:This check doesn't actually do anything? It always returns zero I think? Not sure
     if time.shape[0] > 1:
         assert np.all(timestep == time[1:] - time[:-1])
 

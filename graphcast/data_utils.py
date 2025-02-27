@@ -15,11 +15,12 @@
 
 from typing import Any, Mapping, Sequence, Tuple, Union
 
+import dask.array
 import numpy as np
 import pandas as pd
 import xarray
 
-from graphcast import solar_radiation
+from graphcast import solar_radiation, xarray_tree
 
 TimedeltaLike = Any  # Something convertible to pd.Timedelta.
 TimedeltaStr = str  # A string convertible to pd.Timedelta.
@@ -357,3 +358,164 @@ def extract_inputs_targets_forcings(
     targets = targets[list(target_variables)]
 
     return inputs, targets, forcings
+
+
+def extend_dataset_in_time(
+    dataset: xarray.Dataset,
+    required_number_of_steps: int,
+    forcing_variables: Tuple[str, ...],
+) -> xarray.Dataset:
+    """
+    Extends a dataset to :int required_number_of_steps.
+    """
+
+    supported_forcing_vars = {
+        "year_progress_sin",
+        "year_progress_cos",
+        "day_progress_sin",
+        "day_progress_cos",
+    }
+    assert (
+        set(forcing_variables) == supported_forcing_vars
+    ), f"Got a forcing variables that are not supported! {set(forcing_variables) - supported_forcing_vars}"
+
+    # Get time deltas - pulled from the rollout
+    # Extend the "time" and "datetime" coordinates
+    time = dataset.coords["time"]
+
+    # Assert the first target time corresponds to the timestep.
+    # We use 1 since the first time step is zero
+    timestep = time[1].data
+    if time.shape[0] > 1:
+        time_upper = np.asarray(time[1:])
+        time_lower = np.asarray(time[:-1])
+        assert np.all(timestep == time_upper - time_lower)
+
+    extended_time = np.arange(required_number_of_steps) * timestep
+
+    # Extend the datetime coordinates
+    if "datetime" in dataset.coords:
+        datetime = dataset.coords["datetime"].data
+        first_datetime = datetime[0][0]
+        extended_datetime = extended_time + first_datetime
+        assert np.all(datetime[0] == extended_datetime[: datetime.shape[1]])
+        # datetime needs a batch dim
+        extended_datetime = np.expand_dims(extended_datetime, 0)
+    else:
+        extended_datetime = None
+
+    # Helper that extends the time dim
+    def extend_time(data_array: xarray.DataArray) -> xarray.DataArray:
+        dims = data_array.dims
+        if "time" not in dims:
+            return data_array  # NOTE: We may have vars that are not dependent on time e.g., land_sea_mask
+        shape = list(data_array.shape)
+        shape[dims.index("time")] = required_number_of_steps
+        dask_data = dask.array.zeros(
+            shape=tuple(shape),
+            chunks=-1,  # Will give chunk info directly to `ChunksToZarr``.
+            dtype=data_array.dtype,
+        )
+
+        coords = dict(data_array.coords)
+        coords["time"] = extended_time
+
+        if extended_datetime is not None:
+            coords["datetime"] = (("batch", "time"), extended_datetime)
+
+        return xarray.DataArray(dims=dims, data=dask_data, coords=coords)
+
+    # _dataset is an in-memory structure of dataset without the data
+    _dataset = xarray_tree.map_structure(extend_time, dataset)
+
+    def copy_data(
+        empty_array: xarray.DataArray, array: xarray.DataArray
+    ) -> xarray.DataArray:
+        empty_shape = empty_array.shape
+        shape = array.shape
+
+        # Cases:
+        # 1. lat, lon
+        # 2. batch time lon
+        # 3. batch time lat lon
+        # 4. batch time level lat lon
+        # 5. batch time
+
+        # Case 1 - exact match and copy over
+        if empty_shape == shape:
+            return array
+        # Case 2 - Partial match that needs to be filled in
+        elif empty_shape[2:] == array.shape[2:]:
+            max_t = array.shape[1]
+            empty_array[:, :max_t] = array
+            empty_array[:, max_t:] = np.ones_like(empty_array[:, max_t:]) * np.nan
+            return empty_array
+        return empty_array
+
+    # Copy the data over
+    _dataset = xarray_tree.map_structure(copy_data, _dataset, dataset)
+
+    # Fill in the missing forcing functions
+    # Drop the existing values of the forcing functions
+    _dataset = _dataset.drop_vars(supported_forcing_vars)
+    if "day_progress" in _dataset.keys():
+        _dataset = _dataset.drop_vars({"day_progress"})
+    if "year_progress" in _dataset.keys():
+        _dataset = _dataset.drop_vars({"year_progress"})
+    add_derived_vars(_dataset)
+
+    return _dataset
+
+
+def extract_inputs_targets_forcings_climate(
+    dataset: xarray.Dataset,
+    *,
+    input_variables: Tuple[str, ...],
+    target_variables: Tuple[str, ...],
+    forcing_variables: Tuple[str, ...],
+    pressure_levels: Tuple[int, ...],
+    input_duration: TimedeltaLike,
+    target_lead_times: TargetLeadTimes,
+) -> Tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset]:
+    """
+    Differs from the normal extract_inputs_targets_forcings in that it allows for a target_lead time
+    longer than what is currently available
+
+    This is done by extending the dataset. The extended variables are the forcing variables. Other target vars are filled np.nan.
+    """
+    # TODO: Hackey since it hard codes the time delta but alas
+    target_lead_times, target_duration = _process_target_lead_times_and_get_duration(
+        target_lead_times
+    )
+    # Add two for the input frames
+    required_number_steps: int = int(target_duration / pd.Timedelta("12h")) + 2
+    if required_number_steps < dataset.time.shape[0]:
+        print(" in less than ")
+        return extract_inputs_targets_forcings(
+            dataset,
+            input_variables=input_variables,
+            target_variables=target_variables,
+            forcing_variables=forcing_variables,
+            pressure_levels=pressure_levels,
+            input_duration=input_duration,
+            target_lead_times=target_lead_times,
+        )
+    # Need to extend
+    print("case extend")
+
+    dataset = extend_dataset_in_time(dataset, required_number_steps, forcing_variables)
+    _inputs, _targets, _forcings = extract_inputs_targets_forcings(
+        dataset,
+        input_variables=input_variables,
+        target_variables=target_variables,
+        forcing_variables=forcing_variables,
+        pressure_levels=pressure_levels,
+        input_duration=input_duration,
+        target_lead_times=target_lead_times,
+    )
+
+    assert (
+        _inputs.time.shape[0] != 0 and _inputs.time.shape[0] == 2
+    ), f"After extension, inputs shape is incorrect. Expected {2} and got {_inputs.time.shape}"
+
+    return _inputs, _targets, _forcings
