@@ -47,7 +47,6 @@ def _replicate_dataset(
     devices: Sequence[jax.Device],
 ) -> xarray.Dataset:
     """Used to prepare for xarray_jax.pmap."""
-
     def replicate_variable(variable: xarray.Variable) -> xarray.Variable:
         if replica_dim in variable.dims:
             # TODO(pricei): call device_put_replicated when replicate_to_device==True
@@ -58,6 +57,7 @@ def _replicate_dataset(
                 assert devices is not None
                 # TODO(pricei): Refactor code to use "device_put_replicated" instead of
                 # device_put_sharded.
+                
                 data = jax.device_put_sharded(data, devices)
             else:
                 data = np.stack(data, axis=0)
@@ -345,11 +345,10 @@ def chunked_prediction_generator(
         actual_target_time = current_targets_template.coords["time"]
         current_targets_template = current_targets_template.assign_coords(
             time=targets_chunk_time
-        ).compute()
-
+        )
         current_forcings = forcings.isel(time=target_slice)
         current_forcings = current_forcings.assign_coords(time=targets_chunk_time)
-        current_forcings = current_forcings.compute()
+        current_forcings = current_forcings
         # Make predictions for the chunk.
         rng, this_rng = split_rng_fn(rng)
         predictions = predictor_fn(

@@ -392,6 +392,7 @@ def extend_dataset_in_time(
         assert np.all(timestep == time_upper - time_lower)
 
     extended_time = np.arange(required_number_of_steps) * timestep
+    print('generated new timesteps')
 
     # Extend the datetime coordinates
     if "datetime" in dataset.coords:
@@ -403,6 +404,8 @@ def extend_dataset_in_time(
         extended_datetime = np.expand_dims(extended_datetime, 0)
     else:
         extended_datetime = None
+
+    print('generated new datetime')
 
     # Helper that extends the time dim
     def extend_time(data_array: xarray.DataArray) -> xarray.DataArray:
@@ -427,7 +430,7 @@ def extend_dataset_in_time(
 
     # _dataset is an in-memory structure of dataset without the data
     _dataset = xarray_tree.map_structure(extend_time, dataset)
-
+    print('generated a dataset filled with zeros')
     def copy_data(
         empty_array: xarray.DataArray, array: xarray.DataArray
     ) -> xarray.DataArray:
@@ -448,12 +451,13 @@ def extend_dataset_in_time(
         elif empty_shape[2:] == array.shape[2:]:
             max_t = array.shape[1]
             empty_array[:, :max_t] = array
-            empty_array[:, max_t:] = np.ones_like(empty_array[:, max_t:]) * np.nan
+            #empty_array[:, max_t:] = np.ones_like(empty_array[:, max_t:]) * np.nan
             return empty_array
         return empty_array
 
     # Copy the data over
     _dataset = xarray_tree.map_structure(copy_data, _dataset, dataset)
+    print('copied existing data')
 
     # Fill in the missing forcing functions
     # Drop the existing values of the forcing functions
@@ -462,7 +466,9 @@ def extend_dataset_in_time(
         _dataset = _dataset.drop_vars({"day_progress"})
     if "year_progress" in _dataset.keys():
         _dataset = _dataset.drop_vars({"year_progress"})
+    print('dropped extra vars')
     add_derived_vars(_dataset)
+    print('added derived vars')
 
     return _dataset
 
@@ -504,6 +510,7 @@ def extract_inputs_targets_forcings_climate(
     print("case extend")
 
     dataset = extend_dataset_in_time(dataset, required_number_steps, forcing_variables)
+    print('extended dataset')
     _inputs, _targets, _forcings = extract_inputs_targets_forcings(
         dataset,
         input_variables=input_variables,
