@@ -13,6 +13,8 @@
 # limitations under the License.
 """Dataset utilities."""
 
+from pickle import LIST
+from re import L
 from typing import Any, Mapping, Sequence, Tuple, Union
 
 import dask.array
@@ -213,6 +215,7 @@ def extract_input_target_times(
     dataset: xarray.Dataset,
     input_duration: TimedeltaLike,
     target_lead_times: TargetLeadTimes,
+    climate: bool = False,
 ) -> Tuple[xarray.Dataset, xarray.Dataset]:
     """Extracts inputs and targets for prediction, from a Dataset with a time dim.
 
@@ -266,7 +269,6 @@ def extract_input_target_times(
         final input timestep. So for inputs the times will end at lead time 0,
         for targets the time coordinates will refer to the lead times requested.
     """
-
     (target_lead_times, target_duration) = _process_target_lead_times_and_get_duration(
         target_lead_times
     )
@@ -276,7 +278,24 @@ def extract_input_target_times(
     # that's available as input to the forecast, with all following timesteps
     # forming the target period which needs to be predicted.
     # This means the time coordinates are now forecast lead times.
+
+    # TODO: This is custom so that the first two frames are always the initial condition
+
     time = dataset.coords["time"]
+
+    def pp_time(a):
+        print(pd.to_timedelta(a.time))
+
+    if climate:
+        # NOTE: This is just a heuristic to make the code work.
+        # Ideally, we should do some slicing based on the input
+        # but for now, we just use the first two steps as input and the third as a target
+        cinputs = dataset.isel(time=slice(0, 2))
+        ctargets = dataset.isel(time=slice(2, 3))
+        print("input timesteps", pp_time(cinputs))
+        print("output timesteps", pp_time(ctargets))
+        return cinputs, ctargets
+
     dataset = dataset.assign_coords(time=time + target_duration - time[-1])
 
     # Slice out targets:
@@ -327,6 +346,7 @@ def extract_inputs_targets_forcings(
     pressure_levels: Tuple[int, ...],
     input_duration: TimedeltaLike,
     target_lead_times: TargetLeadTimes,
+    climate: bool = False,
 ) -> Tuple[xarray.Dataset, xarray.Dataset, xarray.Dataset]:
     """Extracts inputs, targets and forcings according to requirements."""
     dataset = dataset.sel(level=list(pressure_levels))
@@ -343,7 +363,10 @@ def extract_inputs_targets_forcings(
     dataset = dataset.drop_vars("datetime")
 
     inputs, targets = extract_input_target_times(
-        dataset, input_duration=input_duration, target_lead_times=target_lead_times
+        dataset,
+        input_duration=input_duration,
+        target_lead_times=target_lead_times,
+        climate=climate,
     )
 
     if set(forcing_variables) & set(target_variables):
@@ -382,30 +405,40 @@ def extend_dataset_in_time(
     # Get time deltas - pulled from the rollout
     # Extend the "time" and "datetime" coordinates
     time = dataset.coords["time"]
-
-    # Assert the first target time corresponds to the timestep.
-    # We use 1 since the first time step is zero
-    timestep = time[1].data
+    # We may not have a dataset which starts at time zero so we have to recenter
+    timestep = time[1].data - time[0].data
     if time.shape[0] > 1:
         time_upper = np.asarray(time[1:])
         time_lower = np.asarray(time[:-1])
         assert np.all(timestep == time_upper - time_lower)
 
     extended_time = np.arange(required_number_of_steps) * timestep
-    print('generated new timesteps')
+
+    # It might be the case that we don't start at timestep 0
+    start_time_step = time[0].data
+    extended_time += start_time_step
+    print("generated new timesteps")
 
     # Extend the datetime coordinates
     if "datetime" in dataset.coords:
         datetime = dataset.coords["datetime"].data
         first_datetime = datetime[0][0]
-        extended_datetime = extended_time + first_datetime
+
+        # NOTE: Extended time might have negative time steps? So we need to normalize by the min
+        if extended_time[0] != 0:
+            normalized_extended_time = (
+                extended_time - extended_time[0]
+            )  # subtract since negative
+        else:
+            normalized_extended_time = extended_time
+        extended_datetime = normalized_extended_time + first_datetime
         assert np.all(datetime[0] == extended_datetime[: datetime.shape[1]])
         # datetime needs a batch dim
         extended_datetime = np.expand_dims(extended_datetime, 0)
     else:
         extended_datetime = None
 
-    print('generated new datetime')
+    print("generated new datetime")
 
     # Helper that extends the time dim
     def extend_time(data_array: xarray.DataArray) -> xarray.DataArray:
@@ -430,7 +463,8 @@ def extend_dataset_in_time(
 
     # _dataset is an in-memory structure of dataset without the data
     _dataset = xarray_tree.map_structure(extend_time, dataset)
-    print('generated a dataset filled with zeros')
+    print("generated a dataset filled with zeros")
+
     def copy_data(
         empty_array: xarray.DataArray, array: xarray.DataArray
     ) -> xarray.DataArray:
@@ -451,13 +485,13 @@ def extend_dataset_in_time(
         elif empty_shape[2:] == array.shape[2:]:
             max_t = array.shape[1]
             empty_array[:, :max_t] = array
-            #empty_array[:, max_t:] = np.ones_like(empty_array[:, max_t:]) * np.nan
+            # empty_array[:, max_t:] = np.ones_like(empty_array[:, max_t:]) * np.nan
             return empty_array
         return empty_array
 
     # Copy the data over
     _dataset = xarray_tree.map_structure(copy_data, _dataset, dataset)
-    print('copied existing data')
+    print("copied existing data")
 
     # Fill in the missing forcing functions
     # Drop the existing values of the forcing functions
@@ -466,9 +500,9 @@ def extend_dataset_in_time(
         _dataset = _dataset.drop_vars({"day_progress"})
     if "year_progress" in _dataset.keys():
         _dataset = _dataset.drop_vars({"year_progress"})
-    print('dropped extra vars')
+    print("dropped extra vars")
     add_derived_vars(_dataset)
-    print('added derived vars')
+    print("added derived vars")
 
     return _dataset
 
@@ -495,8 +529,12 @@ def extract_inputs_targets_forcings_climate(
     )
     # Add two for the input frames
     required_number_steps: int = int(target_duration / pd.Timedelta("12h")) + 2
+    # NOTE: Since this is a climate rollout, we always only use 3 steps to rollout
+    required_number_steps = 3
+    # In fact, this should only be run once by the original dataset. Otherwise,
+    # We will always extend the dataset
     if required_number_steps < dataset.time.shape[0]:
-        print(" in less than ")
+        print("in vanilla extract")
         return extract_inputs_targets_forcings(
             dataset,
             input_variables=input_variables,
@@ -505,12 +543,11 @@ def extract_inputs_targets_forcings_climate(
             pressure_levels=pressure_levels,
             input_duration=input_duration,
             target_lead_times=target_lead_times,
+            climate=True,
         )
     # Need to extend
-    print("case extend")
 
     dataset = extend_dataset_in_time(dataset, required_number_steps, forcing_variables)
-    print('extended dataset')
     _inputs, _targets, _forcings = extract_inputs_targets_forcings(
         dataset,
         input_variables=input_variables,
@@ -519,6 +556,7 @@ def extract_inputs_targets_forcings_climate(
         pressure_levels=pressure_levels,
         input_duration=input_duration,
         target_lead_times=target_lead_times,
+        climate=True,
     )
 
     assert (
