@@ -292,8 +292,8 @@ def extract_input_target_times(
         # but for now, we just use the first two steps as input and the third as a target
         cinputs = dataset.isel(time=slice(0, 2))
         ctargets = dataset.isel(time=slice(2, 3))
-        print("input timesteps", pp_time(cinputs))
-        print("output timesteps", pp_time(ctargets))
+        # print("input timesteps", pp_time(cinputs))
+        # print("output timesteps", pp_time(ctargets))
         return cinputs, ctargets
 
     dataset = dataset.assign_coords(time=time + target_duration - time[-1])
@@ -417,7 +417,7 @@ def extend_dataset_in_time(
     # It might be the case that we don't start at timestep 0
     start_time_step = time[0].data
     extended_time += start_time_step
-    print("generated new timesteps")
+    # print("generated new timesteps")
 
     # Extend the datetime coordinates
     if "datetime" in dataset.coords:
@@ -438,7 +438,7 @@ def extend_dataset_in_time(
     else:
         extended_datetime = None
 
-    print("generated new datetime")
+    # print("generated new datetime")
 
     # Helper that extends the time dim
     def extend_time(data_array: xarray.DataArray) -> xarray.DataArray:
@@ -463,7 +463,7 @@ def extend_dataset_in_time(
 
     # _dataset is an in-memory structure of dataset without the data
     _dataset = xarray_tree.map_structure(extend_time, dataset)
-    print("generated a dataset filled with zeros")
+    # print("generated a dataset filled with zeros")
 
     def copy_data(
         empty_array: xarray.DataArray, array: xarray.DataArray
@@ -491,7 +491,7 @@ def extend_dataset_in_time(
 
     # Copy the data over
     _dataset = xarray_tree.map_structure(copy_data, _dataset, dataset)
-    print("copied existing data")
+    # print("copied existing data")
 
     # Fill in the missing forcing functions
     # Drop the existing values of the forcing functions
@@ -500,9 +500,9 @@ def extend_dataset_in_time(
         _dataset = _dataset.drop_vars({"day_progress"})
     if "year_progress" in _dataset.keys():
         _dataset = _dataset.drop_vars({"year_progress"})
-    print("dropped extra vars")
+    # print("dropped extra vars")
     add_derived_vars(_dataset)
-    print("added derived vars")
+    # print("added derived vars")
 
     return _dataset
 
@@ -534,7 +534,6 @@ def extract_inputs_targets_forcings_climate(
     # In fact, this should only be run once by the original dataset. Otherwise,
     # We will always extend the dataset
     if required_number_steps < dataset.time.shape[0]:
-        print("in vanilla extract")
         return extract_inputs_targets_forcings(
             dataset,
             input_variables=input_variables,
