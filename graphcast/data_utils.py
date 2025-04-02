@@ -495,7 +495,13 @@ def extend_dataset_in_time(
 
     # Fill in the missing forcing functions
     # Drop the existing values of the forcing functions
-    _dataset = _dataset.drop_vars(supported_forcing_vars)
+    for v in supported_forcing_vars:
+        if v in _dataset.data_vars:
+            _dataset = _dataset.drop_vars(
+                {
+                    v,
+                }
+            )
     if "day_progress" in _dataset.keys():
         _dataset = _dataset.drop_vars({"day_progress"})
     if "year_progress" in _dataset.keys():
