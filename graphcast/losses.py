@@ -53,6 +53,26 @@ class LossFunction(Protocol):
     """
 
 
+def latitude_weighted_mse(
+    predictions: xarray.Dataset,
+    targets: xarray.Dataset,
+    skipna: bool = True,
+    rmse: bool = False,
+) -> LossAndDiagnostics:
+  """Latitude- and pressure-level-weighted MSE loss."""
+  def loss(prediction, target):
+    loss = (prediction - target)**2
+    loss *= normalized_latitude_weights(target).astype(loss.dtype)
+    return _preserving_mean(loss, ['batch', 'sample', 'level', 'time'], skipna)
+  losses = xarray_tree.map_structure(loss, predictions, targets)
+  if rmse:
+    losses = np.sqrt(losses)
+  return losses
+
+def _preserving_mean(x: xarray.DataArray, skipped_dims: list[str], skipna: bool = False) -> xarray.DataArray:
+  return x.mean([d for d in x.dims if d not in skipped_dims], skipna=skipna)
+
+
 def weighted_mse_per_level(
     predictions: xarray.Dataset,
     targets: xarray.Dataset,
